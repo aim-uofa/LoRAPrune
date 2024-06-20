@@ -9,8 +9,9 @@
   
 > **[LoRAPrune: Pruning Meets Low-Rank Parameter-Efficient Fine-Tuning](https://arxiv.org/abs/2305.18403)** [[arXiv]](https://arxiv.org/abs/2305.18403)
 > 
-> *Mingyang Zhang<sup>1,2</sup>, Hao Chen<sup>1</sup>, Chunhua Shen<sup>1</sup>, Zhen Yang<sup>1</sup>, Linlin Ou<sup>2</sup>, Xinyi Yu<sup>2</sup>, Bohan Zhuang<sup>3</sup>*   
-> *Zhejiang University<sup>1</sup>, Zhejiang University of Technology<sup>2</sup>, Monash University<sup>3</sup>*
+> *Mingyang Zhang<sup>1,2</sup>, Hao Chen<sup>1</sup>, Chunhua Shen<sup>1,3</sup>, Zhen Yang<sup>1</sup>, Linlin 
+> Ou<sup>2</sup>, Xinyi Yu<sup>2</sup>, Bohan Zhuang<sup>1</sup>*   
+> *Zhejiang University<sup>1</sup>, Zhejiang University of Technology<sup>2</sup>, Ant Group<sup>3</sup>*
 
 This repository contains code for reproducing LoRAPrune. LoRAPrune can iteratively prune LPMs in a memory-efficient manner. Specifically, LoRAPrune uses a LoRA-guided pruning criterion, which uses the weights and gradients of LoRA, rather than the gradients of pre-trained weights for importance estimation. 
 
