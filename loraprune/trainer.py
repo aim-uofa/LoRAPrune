@@ -1,5 +1,37 @@
-from transformers.trainer import *
+from transformers.trainer import (
+    Trainer,
+    TrainerState,
+    TrainOutput,
+    has_length,
+    is_sagemaker_mp_enabled,
+    get_model_param_count,
+    speed_metrics,
+    deepspeed_init,
+    TRAINER_STATE_NAME,
+)
+from transformers.trainer_callback import ExportableState
 import loraprune.utils as utils
+import math
+import sys
+import time
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, DistributedSampler, RandomSampler
+from transformers.trainer_pt_utils import IterableDatasetShard
+from transformers.utils import logging, is_torch_xla_available, is_apex_available
+from transformers.debug_utils import DebugOption, DebugUnderflowOverflow
+import os
+from packaging import version
+import shutil
+
+if is_apex_available():
+    from apex import amp
+
+parsed_torch_version_base = version.parse(version.parse(torch.__version__).base_version)
+
+is_torch_less_than_1_11 = parsed_torch_version_base < version.parse("1.11")
+logger = logging.get_logger(__name__)
+
 class LoRAPruneTrainer(Trainer):
     def __init__(self, model,
                  train_dataset,
@@ -81,12 +113,8 @@ class LoRAPruneTrainer(Trainer):
             else:
                 debug_overflow = DebugUnderflowOverflow(self.model)  # noqa
 
-        delay_optimizer_creation = (
-            self.sharded_ddp is not None
-            and self.sharded_ddp != ShardedDDPOption.SIMPLE
-            or is_sagemaker_mp_enabled()
-            or self.fsdp is not None
-        )
+        delay_optimizer_creation = is_sagemaker_mp_enabled() or self.is_fsdp_xla_enabled or self.is_fsdp_enabled
+
         if args.deepspeed:
             deepspeed_engine, optimizer, lr_scheduler = deepspeed_init(
                 self, num_training_steps=max_steps, resume_from_checkpoint=resume_from_checkpoint
@@ -99,7 +127,11 @@ class LoRAPruneTrainer(Trainer):
         elif not delay_optimizer_creation:
             self.create_optimizer_and_scheduler(num_training_steps=max_steps)
 
-        self.state = TrainerState()
+        self.state = TrainerState(
+            stateful_callbacks=[
+                cb for cb in self.callback_handler.callbacks + [self.control] if isinstance(cb, ExportableState)
+            ]
+        )
         self.state.is_hyper_param_search = trial is not None
 
         # Activate gradient checkpointing if needed
@@ -254,20 +286,11 @@ class LoRAPruneTrainer(Trainer):
                 if step % args.gradient_accumulation_steps == 0:
                     self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
 
-                if (
-                    (total_batched_samples % args.gradient_accumulation_steps != 0)
-                    and args.local_rank != -1
-                    and args._no_sync_in_gradient_accumulation
-                ):
-                    # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
-                    with model.no_sync():
-                        tr_loss_step = self.training_step(model, inputs)
-                else:
-                    tr_loss_step = self.training_step(model, inputs)
+                tr_loss_step = self.training_step(model, inputs)
 
                 if (
                     args.logging_nan_inf_filter
-                    and not is_torch_tpu_available()
+                    and not is_torch_xla_available()
                     and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
                 ):
                     # if loss is nan or inf simply add the average of previous logged losses
@@ -290,21 +313,20 @@ class LoRAPruneTrainer(Trainer):
                     if args.max_grad_norm is not None and args.max_grad_norm > 0 and not self.deepspeed:
                         # deepspeed does its own clipping
 
-                        if self.do_grad_scaling:
-                            # AMP: gradients need unscaling
-                            self.scaler.unscale_(self.optimizer)
+                        # AMP: gradients need unscaling
+                        # self.scaler.unscale_(self.optimizer)
 
                         if is_sagemaker_mp_enabled() and args.fp16:
-                            self.optimizer.clip_master_grads(args.max_grad_norm)
+                            grad_norm = self.optimizer.clip_master_grads(args.max_grad_norm)
                         elif hasattr(self.optimizer, "clip_grad_norm"):
                             # Some optimizers (like the sharded optimizer) have a specific way to do gradient clipping
-                            self.optimizer.clip_grad_norm(args.max_grad_norm)
+                            grad_norm = self.optimizer.clip_grad_norm(args.max_grad_norm)
                         elif hasattr(model, "clip_grad_norm_"):
                             # Some models (like FullyShardedDDP) have a specific way to do gradient clipping
-                            model.clip_grad_norm_(args.max_grad_norm)
+                            grad_norm = model.clip_grad_norm_(args.max_grad_norm)
                         else:
                             # Revert to normal clipping otherwise, handling Apex or full precision
-                            nn.utils.clip_grad_norm_(
+                            grad_norm = nn.utils.clip_grad_norm_(
                                 amp.master_params(self.optimizer) if self.use_apex else model.parameters(),
                                 args.max_grad_norm,
                             )
@@ -323,14 +345,7 @@ class LoRAPruneTrainer(Trainer):
                     optimizer_was_run = True
                     if self.deepspeed:
                         pass  # called outside the loop
-                    elif self.do_grad_scaling:
-                        scale_before = self.scaler.get_scale()
-                        self.scaler.step(self.optimizer)
-                        self.scaler.update()
-                        scale_after = self.scaler.get_scale()
-                        optimizer_was_run = scale_before <= scale_after
-                    else:
-                        self.optimizer.step()
+                    self.optimizer.step()
 
                     if optimizer_was_run and not self.deepspeed:
                         self.lr_scheduler.step()
@@ -340,7 +355,7 @@ class LoRAPruneTrainer(Trainer):
                     self.state.epoch = epoch + (step + 1 + steps_skipped) / steps_in_epoch
                     self.control = self.callback_handler.on_step_end(args, self.state, self.control)
 
-                    self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
+                    self._maybe_log_save_evaluate(tr_loss, grad_norm if grad_norm is not None else None, model, trial, epoch, ignore_keys_for_eval)
                 else:
                     self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
 
@@ -355,7 +370,7 @@ class LoRAPruneTrainer(Trainer):
                 self.control.should_training_stop = True
 
             self.control = self.callback_handler.on_epoch_end(args, self.state, self.control)
-            self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
+            self._maybe_log_save_evaluate(tr_loss, None, model, trial, epoch, ignore_keys_for_eval)
 
 
             if self.control.should_training_stop:
@@ -398,4 +413,3 @@ class LoRAPruneTrainer(Trainer):
         self.control = self.callback_handler.on_train_end(args, self.state, self.control)
 
         return TrainOutput(self.state.global_step, train_loss, metrics)
-

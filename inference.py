@@ -1,3 +1,4 @@
+import json
 import sys
 import os
 import fire
@@ -9,10 +10,10 @@ from typing import List
 from peft.peft_model import set_peft_model_state_dict
 from loraprune.peft_model import get_peft_model
 from loraprune.utils import freeze, prune_from_checkpoint
-from peft import LoraConfig
+from loraprune.lora import LoraConfig
 from datasets import load_dataset
 
-from transformers import LlamaForCausalLM, LlamaTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 if torch.cuda.is_available():
     device = "cuda"
@@ -44,8 +45,8 @@ def main(
         base_model
     ), "Please specify a --base_model, e.g. --base_model='decapoda-research/llama-7b-hf'"
 
-    tokenizer = LlamaTokenizer.from_pretrained(base_model)
-    model = LlamaForCausalLM.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(base_model, legacy=False)
+    model = AutoModelForCausalLM.from_pretrained(
         base_model,
         load_in_8bit=False,
         torch_dtype=torch.float16,
