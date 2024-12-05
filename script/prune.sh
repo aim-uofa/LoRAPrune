@@ -2,7 +2,7 @@ CUDA_VISIBLE_DEVICES=0 python prune.py \
     --base_model "meta-llama/Llama-3.1-8B-Instruct" \
     --data_path 'MBZUAI/LaMini-instruction' \
     --output_dir 'outputs_dir' \
-    --batch_size 16 \
+    --batch_size 128 \
     --micro_batch_size 2 \
     --num_epochs 2 \
     --learning_rate 1e-4 \
