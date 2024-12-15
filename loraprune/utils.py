@@ -6,7 +6,7 @@ pruning_groups = {'self_attn': ['q_proj', 'k_proj', 'v_proj', 'o_proj'],
                   'mlp': ['up_proj', 'gate_proj'],
                   'block': ['o_proj', 'down_proj']}
 
-DIM = 128
+NUM_ATTENTION_HEADS = 32
 
 def _is_target_larer(module):
     return (isinstance(module, Linear) or isinstance(module, Linear8bitLt)) and module.is_prune
@@ -29,8 +29,10 @@ def init_sensitivity_dict(model):
     sensitivity_record = {}
     for name, module in model.named_modules():
         if _is_target_larer(module):
-            if name.split('.')[-1] in pruning_groups['self_attn']:
-                groups = module.out_features // DIM
+            module_name = name.split('.')[-1]
+            if module_name in pruning_groups['self_attn']:
+                head_dim = module.out_features // NUM_ATTENTION_HEADS
+                groups = module.out_features // head_dim
             else:
                 groups = module.out_features
             name = ".".join(name.split('.')[:-1])
@@ -48,7 +50,6 @@ def update_sensitivity_dict(model, s_dict, pruning_type):
             s = compute_sensitivity(module, is_attn, pruning_type, fan_in)
             name = ".".join(name.split('.')[:-1])
             s_all[name] += s
-            #s_dict[i] += s
     for name, imp in s_all.items():
         if torch.isnan(imp.sum()):
             return s_dict
@@ -77,7 +78,9 @@ def compute_sensitivity(layer, is_attn, prune_metric='lora', transpose=False, no
     if transpose:
         s = s.t()
     if is_attn:
-        s = s.reshape(s.shape[0] // DIM, -1)
+        # Compute dim?
+        head_dim = layer.out_features // NUM_ATTENTION_HEADS
+        s = s.reshape(s.shape[0] // head_dim, -1)
     s = s.sum(1)
     if norm:
         s = s / (torch.linalg.norm(s) + 1e-8)
@@ -107,7 +110,7 @@ def prune_one_layer(layer):
     prune_fp16_module(layer.self_attn.k_proj, layer.self_attn.k_proj.lora_mask, False)
     prune_fp16_module(layer.self_attn.v_proj, layer.self_attn.v_proj.lora_mask, False)
     prune_fp16_module(layer.self_attn.o_proj, layer.self_attn.q_proj.lora_mask, True)
-    layer.self_attn.num_heads = int(layer.self_attn.q_proj.lora_mask.sum()) // DIM
+    layer.self_attn.num_heads = int(layer.self_attn.q_proj.lora_mask.sum()) // 128
     layer.self_attn.hidden_size = int(layer.self_attn.q_proj.lora_mask.sum())
 
     ## mlp
@@ -147,15 +150,16 @@ def local_prune(model, s_dict, ratio, target_ratio):
             mask = torch.ones_like(c_mask)
 
             if is_attn:
-                mask = mask.reshape(-1, DIM)[:, 0]
-                c_mask = c_mask.reshape(-1, DIM)[:, 0]
-                total_num /= DIM
+                head_dim = module.out_features // NUM_ATTENTION_HEADS
+                mask = mask.reshape(-1, head_dim)[:, 0]
+                c_mask = c_mask.reshape(-1, head_dim)[:, 0]
+                total_num /= head_dim
             need_prune_num = int(total_num * ratio)
             importance = s_dict[name] * c_mask
             can_prune = torch.argsort(importance)[:need_prune_num]
             mask[can_prune] = 0
             if is_attn:
-                mask = (mask.new_ones(module.lora_mask.shape).reshape(-1, DIM) * mask.unsqueeze(1)).reshape(-1)
+                mask = (mask.new_ones(module.lora_mask.shape).reshape(-1, head_dim) * mask.unsqueeze(1)).reshape(-1)
             module.lora_mask.data = mask
         else:
             if hasattr(module, 'weight'):

@@ -1,5 +1,6 @@
 from peft.peft_model import PeftModelForCausalLM, set_peft_model_state_dict
-from peft.utils.config import PeftType, PeftConfig
+from peft.utils import PeftType
+from peft import PeftConfig
 from accelerate import dispatch_model, infer_auto_device_map
 from accelerate.hooks import AlignDevicesHook, add_hook_to_module, remove_hook_from_submodules
 from accelerate.utils import get_balanced_memory
@@ -80,6 +81,9 @@ class LoraPeftModelForCausalLM(PeftModelForCausalLM):
                 add_hook_to_module(model.base_model, hook)
         return model
 
+    @property
+    def active_peft_config(self):
+        return self.peft_config
 
 
 

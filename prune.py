@@ -8,10 +8,10 @@ import transformers
 from datasets import load_dataset
 from loraprune.trainer import LoRAPruneTrainer
 from loraprune.utils import freeze
+from loraprune.lora import LoraConfig
 
 from peft import (
-    LoraConfig,
-    prepare_model_for_int8_training,
+    prepare_model_for_kbit_training,
 )
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft.peft_model import get_peft_model_state_dict, set_peft_model_state_dict
@@ -160,7 +160,7 @@ def train(
         return tokenized_full_prompt
 
     if load_in_8bit:
-        model = prepare_model_for_int8_training(model)
+        model = prepare_model_for_kbit_training(model)
 
     # TODO: convert sparseLinear for model here
     # utils.convert_sparse_network(model, target_modules=lora_target_modules)
@@ -171,6 +171,7 @@ def train(
         lora_dropout=lora_dropout,
         bias="none",
         task_type="CAUSAL_LM",
+        peft_type="LORA"
     )
     from loraprune.peft_model import get_peft_model
     # from peft import get_peft_model
